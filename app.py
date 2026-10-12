@@ -2,11 +2,16 @@ import os
 import uuid
 import threading
 import subprocess
+
+# FFmpeg অটোমেটিক বাইনারি পাথ লোডার (Render নো-রুট ফিক্স)
+import static_ffmpeg
+static_ffmpeg.add_paths()
+
 from flask import Flask, request, render_template_string, send_file, after_this_request
 import telebot
 
 # ================= Configuration =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Render Environment Variable থেকে টোকেন নেবে
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 UPLOAD_FOLDER = "uploads"
 PROCESSED_FOLDER = "processed"
 
@@ -16,12 +21,11 @@ os.makedirs(PROCESSED_FOLDER, exist_ok=True)
 app = Flask(__name__)
 bot = telebot.TeleBot(BOT_TOKEN) if BOT_TOKEN else None
 
-# ================= FFmpeg Processor =================
+# ================= FFmpeg Video Engine =================
 def process_video(input_path, output_path):
     """
-    ভিডিওর মেটাডাটা স্ট্রিপ, স্পিড ও ফ্রেম সামান্য পরিবর্তন করে রেন্ডার করে
+    FFmpeg দিয়ে মেটাডাটা রিমুভ, ফ্রেম সামান্য ক্রপ/জুম, স্পিড ও অডিও পিচ পরিবর্তন
     """
-    # ফিল্টার: সামান্য জুম + স্পিড ১.০৩x + অডিও পিচ শিফট + কালার টিউন
     vf_filter = "scale=1.03*iw:1.03*ih,crop=iw:ih,setpts=PTS/1.03,eq=contrast=1.05:saturation=1.05"
     af_filter = "atempo=1.03,asetrate=44100*1.02"
 
@@ -30,9 +34,9 @@ def process_video(input_path, output_path):
         "-i", input_path,
         "-vf", vf_filter,
         "-af", af_filter,
-        "-map_metadata", "-1",  # মেটাডাটা সম্পূর্ণ রিমুভ
+        "-map_metadata", "-1",
         "-c:v", "libx264",
-        "-preset", "ultrafast",   # ফাস্ট প্রসেসিং
+        "-preset", "ultrafast",
         "-crf", "26",
         "-c:a", "aac",
         output_path
@@ -104,7 +108,7 @@ def index():
         if not success:
             return "Processing failed with FFmpeg", 500
 
-        # ইউজার ডাউনলোড শেষ করার পর ক্লিন ফাইলটি রিমুভ করে দেওয়া
+        # ইউজার ডাউনলোড শেষ করার পর ফাইলটি রিমুভ করে ডিস্ক খালি রাখা
         @after_this_request
         def cleanup(response):
             try:
@@ -123,12 +127,12 @@ def index():
 if bot:
     @bot.message_handler(commands=['start'])
     def send_welcome(message):
-        bot.reply_to(message, "👋 স্বাগতম! যেকোনো ভিডিও সেন্ড করুন, আমি মেটাডাটা ও ফিল্টার পরিবর্তন করে কপিরাইট বাইপাস উপযোগী করে ফেরত দেব।")
+        bot.reply_to(message, "স্বাগতম! যেকোনো ভিডিও সেন্ড করুন, আমি মেটাডাটা ও ফিল্টার পরিবর্তন করে প্রসেস করে ফেরত দেব।")
 
     @bot.message_handler(content_types=['video'])
     def handle_video(message):
         chat_id = message.chat.id
-        status_msg = bot.reply_to(message, "📥 ভিডিও ডাউনলোড হচ্ছে...")
+        status_msg = bot.reply_to(message, "ভিডিও ডাউনলোড হচ্ছে...")
         
         task_id = str(uuid.uuid4())[:8]
         input_filename = os.path.join(UPLOAD_FOLDER, f"tg_{task_id}.mp4")
@@ -141,33 +145,32 @@ if bot:
             with open(input_filename, 'wb') as f:
                 f.write(downloaded_file)
 
-            bot.edit_message_text("⚙️ প্রসেসিং চলছে (FFmpeg)...", chat_id=chat_id, message_id=status_msg.message_id)
+            bot.edit_message_text("প্রসেসিং চলছে (FFmpeg)...", chat_id=chat_id, message_id=status_msg.message_id)
 
             if process_video(input_filename, output_filename):
-                bot.edit_message_text("📤 আপলোড হচ্ছে...", chat_id=chat_id, message_id=status_msg.message_id)
+                bot.edit_message_text("আপলোড হচ্ছে...", chat_id=chat_id, message_id=status_msg.message_id)
                 with open(output_filename, 'rb') as video:
-                    bot.send_video(chat_id, video, caption="✅ আপনার প্রসেস করা ভিডিও তৈরি!")
+                    bot.send_video(chat_id, video, caption="আপনার প্রসেস করা ভিডিও তৈরি!")
                 bot.delete_message(chat_id, status_msg.message_id)
             else:
-                bot.edit_message_text("❌ ভিডিও প্রসেস করতে ব্যর্থ হয়েছে।", chat_id=chat_id, message_id=status_msg.message_id)
+                bot.edit_message_text("ভিডিও প্রসেস করতে ব্যর্থ হয়েছে।", chat_id=chat_id, message_id=status_msg.message_id)
 
         except Exception as e:
-            bot.send_message(chat_id, f"⚠️ ত্রুটি: {str(e)}")
+            bot.send_message(chat_id, f"ত্রুটি: {str(e)}")
         finally:
-            # ডিস্কের জায়গা খালি করতে ফাইল ডিলিট
             for f in [input_filename, output_filename]:
                 if os.path.exists(f):
                     os.remove(f)
 
     def run_bot():
-        print("Telegram bot started...")
+        print("Telegram bot polling started...")
         bot.infinity_polling(skip_pending=True)
 
-    # ব্যাকগ্রাউন্ড থ্রেডে টেলিগ্রাম বট চালু
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
 
 
-# ================= Local / Entry Point =================
+# ================= Local Execution =================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
