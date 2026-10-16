@@ -10,7 +10,7 @@ import telebot
 import yt_dlp
 import requests
 
-# ১. Render Port সচল রাখতে লাইটওয়েট ডামি সার্ভার (ডিপ্লয় ফেইল ও ডিলে হওয়া ঠেকাবে)
+# ১. Render পোর্টের জন্য ডামি ওয়েব সার্ভার
 app = Flask(__name__)
 
 @app.route('/')
@@ -28,7 +28,7 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# FFmpeg এক্সিকিউটেবল পাথ
+# FFmpeg পাথ
 FFMPEG_PATH = os.path.abspath("ffmpeg_bin/ffmpeg") if os.path.exists("ffmpeg_bin/ffmpeg") else "ffmpeg"
 FFPROBE_PATH = os.path.abspath("ffmpeg_bin/ffprobe") if os.path.exists("ffmpeg_bin/ffprobe") else "ffprobe"
 
@@ -41,27 +41,29 @@ def resolve_url(url):
 
 def edit_video_with_ffmpeg(input_video, overlay_image, output_video):
     """
-    কালার অ্যাডজাস্টমেন্ট ও comnt.png মাঝখানের নিচে বসানোর ফিল্টার
+    পুরো ভিডিওটি নিখুঁতভাবে কালার অ্যাডজাস্ট এবং comnt.png ওভারলে করার ফাংশন
     """
+    # -loop 1 যুক্ত করা হয়েছে যাতে ইমেজটি সম্পূর্ণ ভিডিও জুড়ে বিদ্যমান থাকে
+    # shortest=1 দিয়ে নিশ্চিত করা হয়েছে যাতে মূল ভিডিওর শেষ ফ্রেম পর্যন্ত এটি রেন্ডার হয়
     filter_complex = (
         "[0:v]eq=contrast=1.12:brightness=0.03:saturation=1.22[enhanced];"
-        "[1:v][enhanced]scale2ref=w='iw*0.65':h='ow/mdar'[overlay_scaled][bg];"
-        "[bg][overlay_scaled]overlay=(W-w)/2:H-h-120[v_out]"
+        "[1:v]scale='iw*0.65':-1[overlay_scaled];"
+        "[enhanced][overlay_scaled]overlay=(W-w)/2:H-h-120:shortest=1[v_out]"
     )
 
     cmd = [
         FFMPEG_PATH,
         "-y",
         "-i", input_video,
+        "-loop", "1",
         "-i", overlay_image,
         "-filter_complex", filter_complex,
         "-map", "[v_out]",
         "-map", "0:a?",
         "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "128k",
+        "-preset", "ultrafast",  # রেন্ডারিং দ্রুত করতে ultrafast
+        "-crf", "24",
+        "-c:a", "copy",          # অডিও যেন কোনো ড্রপ না করে সরাসরি কপি হবে
         "-movflags", "+faststart",
         output_video
     ]
@@ -76,10 +78,10 @@ def start_cmd(message):
         f"👋 **স্বাগতম {message.from_user.first_name}!** 🎬\n\n"
         "Facebook, TikTok অথবা Instagram-এর যেকোনো ভিডিওর লিংক পাঠান।\n\n"
         "⚡ **স্বয়ংক্রিয় প্রসেসিং:**\n"
-        "• ভিডিও ডাউনলোড\n"
-        "• কালার ভাইব্র্যান্ট অ্যাডজাস্টমেন্ট\n"
+        "• পুরো ভিডিও ডাউনলোড\n"
+        "• সম্পূর্ণ ভিডিওর কালার ভাইব্র্যান্ট অ্যাডজাস্টমেন্ট\n"
         "• 'Comment Box Check' ব্যাজ ওভারলে\n"
-        "• সম্পূর্ণ প্রসেস শেষে টেলিগ্রামে ডেলিভারি!\n\n"
+        "• ফুল লেন্থ এডিট শেষে টেলিগ্রামে ডেলিভারি!\n\n"
         "👉 এখনই একটি লিংক পাঠিয়ে পরীক্ষা করুন।"
     )
     bot.reply_to(message, welcome_text, parse_mode="Markdown")
@@ -106,7 +108,7 @@ def process_video(message):
         bot.reply_to(message, "⚠️ রিপোজিটরিতে `comnt.png` ফাইলটি পাওয়া যায়নি! দয়া করে GitHub-এ ফাইলটি আপলোড করুন।")
         return
 
-    status_msg = bot.reply_to(message, "⏳ ভিডিও ডাউনলোড করা হচ্ছে...")
+    status_msg = bot.reply_to(message, "⏳ সম্পূর্ণ ভিডিও ডাউনলোড করা হচ্ছে...")
     user_id = message.chat.id
     output_dir = f"downloads/{user_id}"
     os.makedirs(output_dir, exist_ok=True)
@@ -144,7 +146,7 @@ def process_video(message):
                 bot.edit_message_text("❌ ভিডিও ডাউনলোড করা সম্ভব হয়নি।", user_id, status_msg.message_id)
                 return
 
-        bot.edit_message_text("🎨 কালার অ্যাডজাস্ট এবং ফটো ওভারলে এডিটিং চলছে...", user_id, status_msg.message_id)
+        bot.edit_message_text("🎨 সম্পূর্ণ ভিডিওর কালার অ্যাডজাস্ট ও ফটো ওভারলে এডিটিং চলছে...", user_id, status_msg.message_id)
         edit_video_with_ffmpeg(raw_video_path, overlay_png, edited_video_path)
 
         file_size_mb = os.path.getsize(edited_video_path) / (1024 * 1024)
@@ -152,7 +154,7 @@ def process_video(message):
             bot.edit_message_text("❌ এডিটের পর ফাইল সাইজ ৫০MB অতিক্রম করায় টেলিগ্রামে পাঠানো সম্ভব নয়।", user_id, status_msg.message_id)
             return
 
-        bot.edit_message_text("📤 এডিটেড ভিডিও আপলোড হচ্ছে...", user_id, status_msg.message_id)
+        bot.edit_message_text("📤 এডিটেড সম্পূর্ণ ভিডিও আপলোড হচ্ছে...", user_id, status_msg.message_id)
 
         escaped_title = html.escape(video_title)
         caption_text = (
@@ -175,7 +177,6 @@ def process_video(message):
             shutil.rmtree(output_dir, ignore_errors=True)
 
 if __name__ == "__main__":
-    # Flask ডামি সার্ভার আলাদা থ্রেডে চালানো (Render পোর্ট ডিটেক্টের জন্য)
     threading.Thread(target=run_web_server, daemon=True).start()
 
     try:
