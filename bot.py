@@ -4,18 +4,31 @@ import time
 import html
 import shutil
 import subprocess
+import threading
+from flask import Flask
 import telebot
 import yt_dlp
 import requests
 
-# ১. টেলিগ্রাম বট কনফিগারেশন
+# ১. Render Port সচল রাখতে লাইটওয়েট ডামি সার্ভার (ডিপ্লয় ফেইল ও ডিলে হওয়া ঠেকাবে)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Editor Bot is Running Healthy!"
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
+# ২. টেলিগ্রাম বট কনফিগারেশন
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN এনভায়রনমেন্ট ভ্যারিয়েবল পাওয়া যায়নি!")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# FFmpeg এক্সিকিউটেবল পাথ নির্ধারণ
+# FFmpeg এক্সিকিউটেবল পাথ
 FFMPEG_PATH = os.path.abspath("ffmpeg_bin/ffmpeg") if os.path.exists("ffmpeg_bin/ffmpeg") else "ffmpeg"
 FFPROBE_PATH = os.path.abspath("ffmpeg_bin/ffprobe") if os.path.exists("ffmpeg_bin/ffprobe") else "ffprobe"
 
@@ -28,12 +41,8 @@ def resolve_url(url):
 
 def edit_video_with_ffmpeg(input_video, overlay_image, output_video):
     """
-    FFmpeg দিয়ে ভিডিওর কালার অ্যাডজাস্ট এবং comnt.png মাঝখানের নিচে ওভারলে করার ফাংশন
+    কালার অ্যাডজাস্টমেন্ট ও comnt.png মাঝখানের নিচে বসানোর ফিল্টার
     """
-    # ফিল্টার লজিক:
-    # ১. eq: saturation=1.2, contrast=1.1, brightness=0.02 (কালার আরও উজ্জ্বল ও স্পষ্ট করার জন্য)
-    # ২. scale2ref: ভিডিওর প্রস্থের ৬০% মাপে comnt.png অটো স্কেল হবে
-    # ৩. overlay: ভিডিওর মাঝখানের কিছুটা নিচে (y = H - h - 120) বসবে
     filter_complex = (
         "[0:v]eq=contrast=1.12:brightness=0.03:saturation=1.22[enhanced];"
         "[1:v][enhanced]scale2ref=w='iw*0.65':h='ow/mdar'[overlay_scaled][bg];"
@@ -65,12 +74,12 @@ def edit_video_with_ffmpeg(input_video, overlay_image, output_video):
 def start_cmd(message):
     welcome_text = (
         f"👋 **স্বাগতম {message.from_user.first_name}!** 🎬\n\n"
-        "আমাকে Facebook, TikTok অথবা Instagram-এর যেকোনো ভিডিওর লিংক পাঠান।\n\n"
-        "⚡ **বট স্বয়ংক্রিয়ভাবে:**\n"
-        "• ভিডিওটি ডাউনলোড করবে\n"
-        "• কালার ভাইব্র্যান্ট ও এইচডি অ্যাডজাস্ট করবে\n"
-        "• 'Comment Box Check' ব্যাজ যুক্ত করবে\n"
-        "• এডিট করে সরাসরি আপনাকে পাঠিয়ে দেবে!\n\n"
+        "Facebook, TikTok অথবা Instagram-এর যেকোনো ভিডিওর লিংক পাঠান।\n\n"
+        "⚡ **স্বয়ংক্রিয় প্রসেসিং:**\n"
+        "• ভিডিও ডাউনলোড\n"
+        "• কালার ভাইব্র্যান্ট অ্যাডজাস্টমেন্ট\n"
+        "• 'Comment Box Check' ব্যাজ ওভারলে\n"
+        "• সম্পূর্ণ প্রসেস শেষে টেলিগ্রামে ডেলিভারি!\n\n"
         "👉 এখনই একটি লিংক পাঠিয়ে পরীক্ষা করুন।"
     )
     bot.reply_to(message, welcome_text, parse_mode="Markdown")
@@ -92,10 +101,9 @@ def process_video(message):
         bot.reply_to(message, "⚠️ শুধুমাত্র Facebook, TikTok এবং Instagram ভিডিও লিংক সাপোর্ট করে।")
         return
 
-    # comnt.png চেক করা
     overlay_png = "comnt.png"
     if not os.path.exists(overlay_png):
-        bot.reply_to(message, "⚠️ সার্ভারে `comnt.png` ফাইলটি পাওয়া যায়নি! দয়া করে GitHub-এ ফাইলটি আপলোড করুন।")
+        bot.reply_to(message, "⚠️ রিপোজিটরিতে `comnt.png` ফাইলটি পাওয়া যায়নি! দয়া করে GitHub-এ ফাইলটি আপলোড করুন।")
         return
 
     status_msg = bot.reply_to(message, "⏳ ভিডিও ডাউনলোড করা হচ্ছে...")
@@ -122,7 +130,6 @@ def process_video(message):
         ydl_opts['ffmpeg_location'] = os.path.abspath("ffmpeg_bin")
 
     try:
-        # ১. ভিডিও ডাউনলোড ও ক্যাপশন সংগ্রহ
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(resolved_url, download=True)
             video_title = info.get('title') or info.get('description') or "Social Video"
@@ -130,7 +137,6 @@ def process_video(message):
                 video_title = video_title[:200] + "..."
 
         if not os.path.exists(raw_video_path):
-            # আউটপুট ফাইলে অন্য এক্সটেনশন থাকলে নাম ঠিক করা
             found_files = glob.glob(f"{output_dir}/raw_video*")
             if found_files:
                 raw_video_path = found_files[0]
@@ -138,11 +144,9 @@ def process_video(message):
                 bot.edit_message_text("❌ ভিডিও ডাউনলোড করা সম্ভব হয়নি।", user_id, status_msg.message_id)
                 return
 
-        # ২. ভিডিও এডিটিং (কালার অ্যাডজাস্ট + comnt.png ওভারলে)
         bot.edit_message_text("🎨 কালার অ্যাডজাস্ট এবং ফটো ওভারলে এডিটিং চলছে...", user_id, status_msg.message_id)
         edit_video_with_ffmpeg(raw_video_path, overlay_png, edited_video_path)
 
-        # ৩. সাইজ চেক ও টেলিগ্রামে আপলোড
         file_size_mb = os.path.getsize(edited_video_path) / (1024 * 1024)
         if file_size_mb > 49.5:
             bot.edit_message_text("❌ এডিটের পর ফাইল সাইজ ৫০MB অতিক্রম করায় টেলিগ্রামে পাঠানো সম্ভব নয়।", user_id, status_msg.message_id)
@@ -171,6 +175,9 @@ def process_video(message):
             shutil.rmtree(output_dir, ignore_errors=True)
 
 if __name__ == "__main__":
+    # Flask ডামি সার্ভার আলাদা থ্রেডে চালানো (Render পোর্ট ডিটেক্টের জন্য)
+    threading.Thread(target=run_web_server, daemon=True).start()
+
     try:
         bot.remove_webhook()
         time.sleep(1)
