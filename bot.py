@@ -10,7 +10,7 @@ import telebot
 import yt_dlp
 import requests
 
-# ১. Render পোর্টের জন্য ডামি ওয়েব সার্ভার
+# ১. Render পোর্ট ফেইল হওয়া ঠেকাতে লাইটওয়েট ডামি সার্ভার
 app = Flask(__name__)
 
 @app.route('/')
@@ -41,14 +41,12 @@ def resolve_url(url):
 
 def edit_video_with_ffmpeg(input_video, overlay_image, output_video):
     """
-    পুরো ভিডিওটি নিখুঁতভাবে কালার অ্যাডজাস্ট এবং comnt.png ওভারলে করার ফাংশন
+    কালার অ্যাডজাস্ট এবং comnt.png পারফেক্ট সাইজে মাঝের নিচে ওভারলে করার ফাংশন
     """
-    # -loop 1 যুক্ত করা হয়েছে যাতে ইমেজটি সম্পূর্ণ ভিডিও জুড়ে বিদ্যমান থাকে
-    # shortest=1 দিয়ে নিশ্চিত করা হয়েছে যাতে মূল ভিডিওর শেষ ফ্রেম পর্যন্ত এটি রেন্ডার হয়
     filter_complex = (
         "[0:v]eq=contrast=1.12:brightness=0.03:saturation=1.22[enhanced];"
-        "[1:v]scale='iw*0.65':-1[overlay_scaled];"
-        "[enhanced][overlay_scaled]overlay=(W-w)/2:H-h-120:shortest=1[v_out]"
+        "[1:v][0:v]scale2ref=w='iw*0.48':h='ow/mdar'[overlay_scaled][bg];"
+        "[enhanced][overlay_scaled]overlay=(W-w)/2:H-h-90:shortest=1[v_out]"
     )
 
     cmd = [
@@ -61,9 +59,9 @@ def edit_video_with_ffmpeg(input_video, overlay_image, output_video):
         "-map", "[v_out]",
         "-map", "0:a?",
         "-c:v", "libx264",
-        "-preset", "ultrafast",  # রেন্ডারিং দ্রুত করতে ultrafast
-        "-crf", "24",
-        "-c:a", "copy",          # অডিও যেন কোনো ড্রপ না করে সরাসরি কপি হবে
+        "-preset", "ultrafast",
+        "-crf", "23",
+        "-c:a", "copy",
         "-movflags", "+faststart",
         output_video
     ]
@@ -76,12 +74,12 @@ def edit_video_with_ffmpeg(input_video, overlay_image, output_video):
 def start_cmd(message):
     welcome_text = (
         f"👋 **স্বাগতম {message.from_user.first_name}!** 🎬\n\n"
-        "Facebook, TikTok অথবা Instagram-এর যেকোনো ভিডিওর লিংক পাঠান।\n\n"
+        "আমাকে Facebook, TikTok অথবা Instagram-এর যেকোনো ভিডিওর লিংক পাঠান।\n\n"
         "⚡ **স্বয়ংক্রিয় প্রসেসিং:**\n"
         "• পুরো ভিডিও ডাউনলোড\n"
-        "• সম্পূর্ণ ভিডিওর কালার ভাইব্র্যান্ট অ্যাডজাস্টমেন্ট\n"
-        "• 'Comment Box Check' ব্যাজ ওভারলে\n"
-        "• ফুল লেন্থ এডিট শেষে টেলিগ্রামে ডেলিভারি!\n\n"
+        "• কালার ভাইব্র্যান্ট ও স্যাচুরেশন অ্যাডজাস্ট\n"
+        "• 'Comment Box Check' ব্যাজ পারফেক্ট সাইজে ওভারলে\n"
+        "• সম্পূর্ণ প্রসেস শেষে টেলিগ্রামে ডেলিভারি!\n\n"
         "👉 এখনই একটি লিংক পাঠিয়ে পরীক্ষা করুন।"
     )
     bot.reply_to(message, welcome_text, parse_mode="Markdown")
@@ -146,7 +144,7 @@ def process_video(message):
                 bot.edit_message_text("❌ ভিডিও ডাউনলোড করা সম্ভব হয়নি।", user_id, status_msg.message_id)
                 return
 
-        bot.edit_message_text("🎨 সম্পূর্ণ ভিডিওর কালার অ্যাডজাস্ট ও ফটো ওভারলে এডিটিং চলছে...", user_id, status_msg.message_id)
+        bot.edit_message_text("🎨 কালার অ্যাডজাস্ট এবং ফটো ওভারলে এডিটিং চলছে...", user_id, status_msg.message_id)
         edit_video_with_ffmpeg(raw_video_path, overlay_png, edited_video_path)
 
         file_size_mb = os.path.getsize(edited_video_path) / (1024 * 1024)
