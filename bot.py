@@ -10,7 +10,7 @@ import telebot
 import yt_dlp
 import requests
 
-# ১. Render পোর্ট ফেইল হওয়া ঠেকাতে লাইটওয়েট ডামি সার্ভার
+# ১. Render পোর্টের জন্য ওয়েব সার্ভার
 app = Flask(__name__)
 
 @app.route('/')
@@ -28,7 +28,6 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# FFmpeg পাথ
 FFMPEG_PATH = os.path.abspath("ffmpeg_bin/ffmpeg") if os.path.exists("ffmpeg_bin/ffmpeg") else "ffmpeg"
 FFPROBE_PATH = os.path.abspath("ffmpeg_bin/ffprobe") if os.path.exists("ffmpeg_bin/ffprobe") else "ffprobe"
 
@@ -41,12 +40,16 @@ def resolve_url(url):
 
 def edit_video_with_ffmpeg(input_video, overlay_image, output_video):
     """
-    কালার অ্যাডজাস্ট এবং comnt.png পারফেক্ট সাইজে মাঝের নিচে ওভারলে করার ফাংশন
+    নিখুঁত স্কেলিং ও পিক্সেল ফরম্যাট ফিক্স করা FFmpeg ফাংশন
     """
+    # ১. scale2ref ফিল্টারে মূল ভিডিওর সাপেক্ষে ইমেজকে 45% স্কেল করা
+    # ২. format=rgba নিশ্চিত করে ট্র্যান্সপারেন্ট পিএনজি ওভারলে করা
+    # ৩. format=yuv420p দিয়ে টেলিগ্রামের কমপ্যাটিবিলিটি বজায় রাখা
     filter_complex = (
         "[0:v]eq=contrast=1.12:brightness=0.03:saturation=1.22[enhanced];"
-        "[1:v][0:v]scale2ref=w='iw*0.48':h='ow/mdar'[overlay_scaled][bg];"
-        "[enhanced][overlay_scaled]overlay=(W-w)/2:H-h-90:shortest=1[v_out]"
+        "[1:v]format=rgba[img];"
+        "[img][enhanced]scale2ref=w='iw*0.48':h='ow/mdar'[overlay_scaled][bg];"
+        "[bg][overlay_scaled]overlay=(W-w)/2:H-h-90:shortest=1,format=yuv420p[v_out]"
     )
 
     cmd = [
@@ -61,25 +64,26 @@ def edit_video_with_ffmpeg(input_video, overlay_image, output_video):
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-crf", "23",
-        "-c:a", "copy",
+        "-c:a", "aac",           # aac দিলে অডিও কোডেক এরর পুরোপুরি বন্ধ হবে
+        "-b:a", "128k",
         "-movflags", "+faststart",
         output_video
     ]
 
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if result.returncode != 0:
-        raise Exception(f"FFmpeg Error: {result.stderr[-300:]}")
+        raise Exception(f"FFmpeg Error: {result.stderr[-350:]}")
 
 @bot.message_handler(commands=['start', 'help'])
 def start_cmd(message):
     welcome_text = (
         f"👋 **স্বাগতম {message.from_user.first_name}!** 🎬\n\n"
-        "আমাকে Facebook, TikTok অথবা Instagram-এর যেকোনো ভিডিওর লিংক পাঠান।\n\n"
-        "⚡ **স্বয়ংক্রিয় প্রসেসিং:**\n"
-        "• পুরো ভিডিও ডাউনলোড\n"
-        "• কালার ভাইব্র্যান্ট ও স্যাচুরেশন অ্যাডজাস্ট\n"
-        "• 'Comment Box Check' ব্যাজ পারফেক্ট সাইজে ওভারলে\n"
-        "• সম্পূর্ণ প্রসেস শেষে টেলিগ্রামে ডেলিভারি!\n\n"
+        "Facebook, TikTok অথবা Instagram-এর যেকোনো ভিডিওর লিংক পাঠান।\n\n"
+        "⚡ **বট স্বয়ংক্রিয়ভাবে:**\n"
+        "• ভিডিওটি ডাউনলোড করবে\n"
+        "• কালার ভাইব্র্যান্ট করবে\n"
+        "• 'Comment Box Check' ব্যাজ ওভারলে করবে\n"
+        "• এডিট করে সরাসরি আপনাকে পাঠিয়ে দেবে!\n\n"
         "👉 এখনই একটি লিংক পাঠিয়ে পরীক্ষা করুন।"
     )
     bot.reply_to(message, welcome_text, parse_mode="Markdown")
