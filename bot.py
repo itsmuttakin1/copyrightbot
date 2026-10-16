@@ -1,42 +1,191 @@
 import os
+import glob
+import time
+import html
+import shutil
+import subprocess
 import telebot
-from processor import process_video
+import yt_dlp
+import requests
 
+# ১. টেলিগ্রাম বট কনফিগারেশন
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN এনভায়রনমেন্ট ভ্যারিয়েবল পাওয়া যায়নি!")
+
 bot = telebot.TeleBot(BOT_TOKEN)
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "ভিডিওটি সেন্ড করুন, আমি প্রসেস করে মেটাডাটা ও ফিল্টার পরিবর্তন করে দিচ্ছি!")
+# FFmpeg এক্সিকিউটেবল পাথ নির্ধারণ
+FFMPEG_PATH = os.path.abspath("ffmpeg_bin/ffmpeg") if os.path.exists("ffmpeg_bin/ffmpeg") else "ffmpeg"
+FFPROBE_PATH = os.path.abspath("ffmpeg_bin/ffprobe") if os.path.exists("ffmpeg_bin/ffprobe") else "ffprobe"
 
-@bot.message_handler(content_types=['video'])
-def handle_video(message):
-    status_msg = bot.reply_to(message, "ভিডিও ডাউনলোড হচ্ছে...")
+def resolve_url(url):
     try:
-        file_info = bot.get_file(message.video.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
+        response = requests.head(url, allow_redirects=True, timeout=10)
+        return response.url
+    except Exception:
+        return url
 
-        input_filename = f"tg_{message.chat.id}_input.mp4"
-        output_filename = f"tg_{message.chat.id}_clean.mp4"
+def edit_video_with_ffmpeg(input_video, overlay_image, output_video):
+    """
+    FFmpeg দিয়ে ভিডিওর কালার অ্যাডজাস্ট এবং comnt.png মাঝখানের নিচে ওভারলে করার ফাংশন
+    """
+    # ফিল্টার লজিক:
+    # ১. eq: saturation=1.2, contrast=1.1, brightness=0.02 (কালার আরও উজ্জ্বল ও স্পষ্ট করার জন্য)
+    # ২. scale2ref: ভিডিওর প্রস্থের ৬০% মাপে comnt.png অটো স্কেল হবে
+    # ৩. overlay: ভিডিওর মাঝখানের কিছুটা নিচে (y = H - h - 120) বসবে
+    filter_complex = (
+        "[0:v]eq=contrast=1.12:brightness=0.03:saturation=1.22[enhanced];"
+        "[1:v][enhanced]scale2ref=w='iw*0.65':h='ow/mdar'[overlay_scaled][bg];"
+        "[bg][overlay_scaled]overlay=(W-w)/2:H-h-120[v_out]"
+    )
 
-        with open(input_filename, 'wb') as f:
-            f.write(downloaded_file)
+    cmd = [
+        FFMPEG_PATH,
+        "-y",
+        "-i", input_video,
+        "-i", overlay_image,
+        "-filter_complex", filter_complex,
+        "-map", "[v_out]",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        output_video
+    ]
 
-        bot.edit_message_text("প্রসেসিং চলছে (FFmpeg)...", chat_id=message.chat.id, message_id=status_msg.message_id)
-        
-        if process_video(input_filename, output_filename):
-            with open(output_filename, 'rb') as video:
-                bot.send_video(message.chat.id, video, caption="এখানে আপনার প্রসেস করা ভিডিও!")
-        else:
-            bot.send_message(message.chat.id, "প্রসেসিং ব্যর্থ হয়েছে।")
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise Exception(f"FFmpeg Error: {result.stderr[-300:]}")
+
+@bot.message_handler(commands=['start', 'help'])
+def start_cmd(message):
+    welcome_text = (
+        f"👋 **স্বাগতম {message.from_user.first_name}!** 🎬\n\n"
+        "আমাকে Facebook, TikTok অথবা Instagram-এর যেকোনো ভিডিওর লিংক পাঠান।\n\n"
+        "⚡ **বট স্বয়ংক্রিয়ভাবে:**\n"
+        "• ভিডিওটি ডাউনলোড করবে\n"
+        "• কালার ভাইব্র্যান্ট ও এইচডি অ্যাডজাস্ট করবে\n"
+        "• 'Comment Box Check' ব্যাজ যুক্ত করবে\n"
+        "• এডিট করে সরাসরি আপনাকে পাঠিয়ে দেবে!\n\n"
+        "👉 এখনই একটি লিংক পাঠিয়ে পরীক্ষা করুন।"
+    )
+    bot.reply_to(message, welcome_text, parse_mode="Markdown")
+
+@bot.message_handler(func=lambda message: True)
+def process_video(message):
+    raw_url = message.text.strip()
+
+    if not (raw_url.startswith("http://") or raw_url.startswith("https://")):
+        bot.reply_to(message, "⚠️ দয়া করে একটি সঠিক ভিডিও URL দিন।")
+        return
+
+    if "youtu" in raw_url:
+        bot.reply_to(message, "⚠️ ইউটিউব ভিডিও সাপোর্ট করে না। ফেসবুক, ইনস্টাগ্রাম বা টিকটকের লিংক দিন।")
+        return
+
+    valid_platforms = ["facebook.com", "fb.watch", "tiktok.com", "instagram.com"]
+    if not any(p in raw_url.lower() for p in valid_platforms):
+        bot.reply_to(message, "⚠️ শুধুমাত্র Facebook, TikTok এবং Instagram ভিডিও লিংক সাপোর্ট করে।")
+        return
+
+    # comnt.png চেক করা
+    overlay_png = "comnt.png"
+    if not os.path.exists(overlay_png):
+        bot.reply_to(message, "⚠️ সার্ভারে `comnt.png` ফাইলটি পাওয়া যায়নি! দয়া করে GitHub-এ ফাইলটি আপলোড করুন।")
+        return
+
+    status_msg = bot.reply_to(message, "⏳ ভিডিও ডাউনলোড করা হচ্ছে...")
+    user_id = message.chat.id
+    output_dir = f"downloads/{user_id}"
+    os.makedirs(output_dir, exist_ok=True)
+
+    resolved_url = resolve_url(raw_url)
+    raw_video_path = f"{output_dir}/raw_video.mp4"
+    edited_video_path = f"{output_dir}/edited_video.mp4"
+
+    ydl_opts = {
+        'format': 'best[filesize<45M]/bestvideo[filesize<35M]+bestaudio[filesize<10M]/best',
+        'merge_output_format': 'mp4',
+        'outtmpl': raw_video_path,
+        'quiet': True,
+        'no_warnings': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        }
+    }
+
+    if os.path.exists("ffmpeg_bin"):
+        ydl_opts['ffmpeg_location'] = os.path.abspath("ffmpeg_bin")
+
+    try:
+        # ১. ভিডিও ডাউনলোড ও ক্যাপশন সংগ্রহ
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(resolved_url, download=True)
+            video_title = info.get('title') or info.get('description') or "Social Video"
+            if len(video_title) > 200:
+                video_title = video_title[:200] + "..."
+
+        if not os.path.exists(raw_video_path):
+            # আউটপুট ফাইলে অন্য এক্সটেনশন থাকলে নাম ঠিক করা
+            found_files = glob.glob(f"{output_dir}/raw_video*")
+            if found_files:
+                raw_video_path = found_files[0]
+            else:
+                bot.edit_message_text("❌ ভিডিও ডাউনলোড করা সম্ভব হয়নি।", user_id, status_msg.message_id)
+                return
+
+        # ২. ভিডিও এডিটিং (কালার অ্যাডজাস্ট + comnt.png ওভারলে)
+        bot.edit_message_text("🎨 কালার অ্যাডজাস্ট এবং ফটো ওভারলে এডিটিং চলছে...", user_id, status_msg.message_id)
+        edit_video_with_ffmpeg(raw_video_path, overlay_png, edited_video_path)
+
+        # ৩. সাইজ চেক ও টেলিগ্রামে আপলোড
+        file_size_mb = os.path.getsize(edited_video_path) / (1024 * 1024)
+        if file_size_mb > 49.5:
+            bot.edit_message_text("❌ এডিটের পর ফাইল সাইজ ৫০MB অতিক্রম করায় টেলিগ্রামে পাঠানো সম্ভব নয়।", user_id, status_msg.message_id)
+            return
+
+        bot.edit_message_text("📤 এডিটেড ভিডিও আপলোড হচ্ছে...", user_id, status_msg.message_id)
+
+        escaped_title = html.escape(video_title)
+        caption_text = (
+            f"🎬 <b>ভিডিও রেডি!</b>\n\n"
+            f"📝 <b>ক্যাপশন (ক্লিক করলে কপি হবে):</b>\n"
+            f"<code>{escaped_title}</code>\n\n"
+            f'video download by "<a href="https://t.me/mrghost_121">Mr Ghost</a>"'
+        )
+
+        with open(edited_video_path, 'rb') as vf:
+            bot.send_video(user_id, vf, caption=caption_text, parse_mode="HTML", supports_streaming=True)
+
+        bot.delete_message(user_id, status_msg.message_id)
 
     except Exception as e:
-        bot.send_message(message.chat.id, f"এরর: {str(e)}")
+        bot.edit_message_text(f"⚠️ ত্রুটি: {str(e)[:150]}", user_id, status_msg.message_id)
+
     finally:
-        # ফাইল ডিলিট করে র‍্যাম/ডিস্ক খালি করা
-        for f in [input_filename, output_filename]:
-            if os.path.exists(f):
-                os.remove(f)
+        if os.path.exists(output_dir):
+            shutil.rmtree(output_dir, ignore_errors=True)
 
 if __name__ == "__main__":
-    bot.infinity_polling()
+    try:
+        bot.remove_webhook()
+        time.sleep(1)
+    except Exception:
+        pass
+
+    print("Bot is successfully running...")
+
+    while True:
+        try:
+            bot.polling(none_stop=True, interval=1, timeout=20)
+        except telebot.apihelper.ApiTelegramException as e:
+            if e.error_code == 409:
+                time.sleep(5)
+            else:
+                time.sleep(3)
+        except Exception:
+            time.sleep(3)
